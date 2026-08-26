@@ -1,0 +1,182 @@
+# =============================================================================
+# Data Prepper — local Mustang dual-write pipeline
+# =============================================================================
+# OTLP in on :21890, fanned out to TWO clusters. Every log / span / service-map
+# record is written to both, so each backend holds the same data:
+#
+#   MUSTANG  (OPTIMIZED / parquet)   http://host.docker.internal:9200
+#     Dev-tree `./gradlew run` node on the host (plaintext HTTP, no auth,
+#     reached via extra_hosts: host-gateway). Sinks use a custom `index:`
+#     (otel-*-plain) plus a `template_file`, so DP auto-creates each index from
+#     a parquet composable template it installs itself. Read via PPL only.
+#
+#   LUCENE   (GENERAL cluster)       https://opensearch:9200
+#     Bundled containerized OpenSearch (admin auth). Sinks use built-in
+#     `index_type`s, which produce the exact index/alias names OSD's Trace
+#     Analytics + Discover expect. Every UI screen reads this (parquet can't
+#     serve _search).
+#
+# Metrics are a third destination: Cortex (Prometheus remote-write).
+#
+# Full rationale — parquet templates & mapping choices, and the four ingest
+# defects behind the Trace Analytics UI:
+#   MustangDevConfig/reference/local-observability-stack/setup.md  (Part 3)
+#   MustangDevConfig/design/mustang-otel-datasource/  (mustang-vs-DP diffs & breakages)
+# =============================================================================
+
+# --- OTLP ingress: split the stream into logs and traces ---
+otlp-pipeline:
+  delay: 10
+  source:
+    otlp:
+      port: 21890
+      ssl: false
+  route:
+    - logs: "getEventType() == \"LOG\""
+    - traces: "getEventType() == \"TRACE\""
+  sink:
+    - pipeline:
+        name: "otel-logs-pipeline"
+        routes:
+          - "logs"
+    - pipeline:
+        name: "otel-traces-pipeline"
+        routes:
+          - "traces"
+
+# --- LOGS ---
+otel-logs-pipeline:
+  workers: 5
+  delay: 10
+  source:
+    pipeline:
+      name: "otlp-pipeline"
+  buffer:
+    bounded_blocking:
+  processor:
+    # UI sorts on @timestamp; DP only emits `time`.
+    - copy_values:
+        entries:
+          - from_key: "time"
+            to_key: "@timestamp"
+    # Drop the one multi-valued scalar (argv array) — a parquet leaf holds a
+    # single value, so it 400s the whole record. See setup.md (multi-valued scalars).
+    - delete_entries:
+        with_keys:
+          - "/resource/attributes/process.command_args"
+  sink:
+    # ── SINK → MUSTANG (parquet, PPL) ──────────────────────────────────────
+    - opensearch:
+        hosts: ["http://host.docker.internal:9200"]
+        insecure: true
+        index: "otel-logs-plain"
+        template_type: index-template
+        template_file: "/usr/share/data-prepper/templates/mustang-otel-logs-template.json"
+    # ── SINK → LUCENE (GENERAL cluster, OSD Discover/Logs UI) ──────────────
+    # log-analytics-plain writes logs-otel-v1-000001 behind the logs-otel-v1 alias.
+    - opensearch:
+        hosts: ["https://opensearch:9200"]
+        username: "admin"
+        password: "My_password_123!@#"
+        insecure: true
+        index_type: log-analytics-plain
+
+# --- TRACES: fan out to raw spans, v2 service map, and v1 service map ---
+otel-traces-pipeline:
+  delay: 100
+  source:
+    pipeline:
+      name: "otlp-pipeline"
+  sink:
+    - pipeline:
+        name: "traces-raw-pipeline"
+    - pipeline:
+        name: "service-map-pipeline"
+
+# --- RAW SPANS ---
+traces-raw-pipeline:
+  source:
+    pipeline:
+      name: "otel-traces-pipeline"
+  processor:
+    - otel_traces:
+    # Drop the two multi-valued scalars (argv + product-id arrays) — same
+    # single-value-leaf limit as logs. See setup.md (multi-valued scalars).
+    - delete_entries:
+        with_keys:
+          - "/resource/attributes/process.command_args"
+          - "/attributes/app.filtered_products.list"
+    # http.url (leaf) vs http.url.path (object) collide because one dotted key
+    # is a prefix of the other; rename so both survive. Without this the whole
+    # span 400s and is dropped (both clusters). setup.md defect #2 / diff D4.
+    - rename_keys:
+        entries:
+          - from_key: "attributes/http.url.path"
+            to_key: "attributes/http.url_path"
+  sink:
+    # ── SINK → MUSTANG (parquet, PPL) ──────────────────────────────────────
+    # events/links are `nested` w/ dynamic:false — an `object` child breaks every
+    # query on the index (design/mustang-otel-datasource, M2).
+    - opensearch:
+        hosts: ["http://host.docker.internal:9200"]
+        insecure: true
+        index: "otel-spans-plain"
+        template_type: index-template
+        template_file: "/usr/share/data-prepper/templates/mustang-otel-spans-template.json"
+    # ── SINK → LUCENE (GENERAL cluster, OSD Trace Analytics) ───────────────
+    # Writes otel-v1-apm-span-000001 behind the otel-v1-apm-span alias the UI queries.
+    # Must be plain-raw, NOT raw: raw's span template mismaps intermediate objects
+    # (KeywordFieldMapper cast) and 400s every span. setup.md defect #1.
+    - opensearch:
+        hosts: ["https://opensearch:9200"]
+        username: "admin"
+        password: "My_password_123!@#"
+        insecure: true
+        index_type: trace-analytics-plain-raw
+
+# --- SERVICE MAP (v2): edges for Mustang, plus METRICS branch to Cortex ---
+service-map-pipeline:
+  delay: 100
+  source:
+    pipeline:
+      name: "otel-traces-pipeline"
+  processor:
+    - otel_apm_service_map:
+        group_by_attributes: [telemetry.sdk.language]
+        window_duration: 10s
+  route:
+    - otel_apm_service_map_route: 'getEventType() == "SERVICE_MAP"'
+    - service_processed_metrics: 'getEventType() == "METRIC"'
+  sink:
+    # ── SINK → MUSTANG (parquet, PPL) ──────────────────────────────────────
+    - opensearch:
+        hosts: ["http://host.docker.internal:9200"]
+        insecure: true
+        index: "otel-service-map-plain"
+        template_type: index-template
+        template_file: "/usr/share/data-prepper/templates/mustang-otel-service-map-template.json"
+        routes: [otel_apm_service_map_route]
+    # ── SINK → CORTEX (metrics) ────────────────────────────────────────────
+    - pipeline:
+        name: "service-metrics-cortex-pipeline"
+        routes: [service_processed_metrics]
+
+# --- METRICS → Cortex (Prometheus remote-write) ---
+service-metrics-cortex-pipeline:
+  delay: 100
+  source:
+    pipeline:
+      name: "service-map-pipeline"
+  processor:
+    - delete_entries:
+        with_keys:
+          - "/attributes/randomKey"
+          - "randomKey"
+  sink:
+    # ── SINK → CORTEX ──────────────────────────────────────────────────────
+    - prometheus:
+        url: "http://prometheus.observability-stack-network:9090/api/v1/push"
+        insecure: true
+        threshold:
+          max_events: 500
+          flush_interval: 5s

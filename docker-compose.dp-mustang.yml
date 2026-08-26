@@ -1,0 +1,53 @@
+# Override: point data-prepper's OpenSearch sinks at the LOCAL Mustang node
+# (dev-tree `./gradlew run`, parquet-backed indices on the host at :9200).
+#
+# Skips the stock env-based sed templating and mounts pipelines.mustang.yaml
+# directly. Dashboards / .kibana stay on the bundled GENERAL cluster — OSD runs
+# saved-object migrations over _search, which the analytics engine doesn't serve.
+#
+# `extra_hosts: host-gateway` is half of what makes the host node reachable from
+# inside the containers — host.docker.internal then resolves to the docker0
+# bridge gateway. The other half is that something must actually LISTEN on that
+# bridge address, since a dev-tree node binds 127.0.0.1 only by default. Either:
+#   * relaunch with -Dtests.opensearch.http.host=127.0.0.1,<bridge-ip> — needs
+#     --preserve-data or `./gradlew run` wipes build/testclusters, or
+#   * run MustangDevConfig/reference/local-observability-stack/mustang-bridge-fwd.py
+#     <bridge-ip> to forward <bridge-ip>:9200 -> 127.0.0.1:9200 (no restart).
+# `ip -4 addr show docker0` gives the bridge IP.
+#
+# opensearch-dashboards gets the same extra_hosts so the Mustang node can be
+# registered as an OSD *data source* at http://host.docker.internal:9200.
+#
+# The three composable index templates that carry the parquet settings are
+# installed by DATA PREPPER ITSELF — each Mustang sink in pipelines.mustang.yaml
+# names one via `template_type: index-template` + `template_file`, and DP PUTs it
+# on sink startup. So otel-{logs,spans,service-map}-plain are AUTO-CREATED on
+# first write, the same flow DP uses for its Lucene indices on the GENERAL
+# cluster. The `templates/` mount below is what makes the files visible; keep it
+# OUT of `pipelines/`, which DP scans for pipeline definitions.
+# This replaced a `mustang-index-templates` curlimages/curl init service (plus a
+# depends_on on it) that PUT the templates out of band; deleted 2026-08-25. Don't
+# reintroduce one at priority 500 — it collides with DP's own templates on the
+# same patterns and the PUT fails outright.
+#
+# Usage (always alongside the base file and the local-env fixes):
+#   docker compose -f docker-compose.yml -f docker-compose.local-env-fixes.yml \
+#                  -f docker-compose.dp-mustang.yml up -d --no-deps --force-recreate data-prepper
+services:
+  data-prepper:
+    command:
+      - /bin/bash
+      - -c
+      - exec /usr/share/data-prepper/bin/data-prepper
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./docker-compose/data-prepper/pipelines.mustang.yaml:/usr/share/data-prepper/pipelines/pipelines.yaml
+      - ./docker-compose/data-prepper/data-prepper-config.yaml:/usr/share/data-prepper/config/data-prepper-config.yaml
+      - ./docker-compose/data-prepper/mustang-otel-logs-template.json:/usr/share/data-prepper/templates/mustang-otel-logs-template.json:ro
+      - ./docker-compose/data-prepper/mustang-otel-spans-template.json:/usr/share/data-prepper/templates/mustang-otel-spans-template.json:ro
+      - ./docker-compose/data-prepper/mustang-otel-service-map-template.json:/usr/share/data-prepper/templates/mustang-otel-service-map-template.json:ro
+
+  opensearch-dashboards:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
