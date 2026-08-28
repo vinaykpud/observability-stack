@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 4,
   "priority": 500,
   "template": {
     "settings": {
@@ -71,7 +71,7 @@
           "type": "nested",
           "properties": {
             "name":       { "type": "keyword", "ignore_above": 256 },
-            "attributes": { "type": "object" },
+            "attributes": { "type": "flat_object" },
             "droppedAttributesCount": { "type": "integer" },
             "time":       { "type": "date_nanos" }
           }
@@ -82,7 +82,7 @@
             "traceId":    { "type": "keyword", "ignore_above": 32 },
             "spanId":     { "type": "keyword", "ignore_above": 16 },
             "traceState": { "type": "keyword", "ignore_above": 1024 },
-            "attributes": { "type": "object" },
+            "attributes": { "type": "flat_object" },
             "droppedAttributesCount": { "type": "integer" }
           }
         }
