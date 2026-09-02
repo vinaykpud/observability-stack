@@ -69,6 +69,7 @@
         },
         "events": {
           "type": "nested",
+          "dynamic": false,
           "properties": {
             "name":       { "type": "keyword", "ignore_above": 256 },
             "attributes": { "type": "flat_object" },
@@ -78,6 +79,7 @@
         },
         "links": {
           "type": "nested",
+          "dynamic": false,
           "properties": {
             "traceId":    { "type": "keyword", "ignore_above": 32 },
             "spanId":     { "type": "keyword", "ignore_above": 16 },
