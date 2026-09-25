@@ -69,22 +69,20 @@
         },
         "events": {
           "type": "nested",
-          "dynamic": false,
           "properties": {
             "name":       { "type": "keyword", "ignore_above": 256 },
-            "attributes": { "type": "flat_object" },
+            "attributes": { "type": "object" },
             "droppedAttributesCount": { "type": "integer" },
             "time":       { "type": "date_nanos" }
           }
         },
         "links": {
           "type": "nested",
-          "dynamic": false,
           "properties": {
             "traceId":    { "type": "keyword", "ignore_above": 32 },
             "spanId":     { "type": "keyword", "ignore_above": 16 },
             "traceState": { "type": "keyword", "ignore_above": 1024 },
-            "attributes": { "type": "flat_object" },
+            "attributes": { "type": "object" },
             "droppedAttributesCount": { "type": "integer" }
           }
         }

@@ -59,11 +59,6 @@ otel-logs-pipeline:
         entries:
           - from_key: "time"
             to_key: "@timestamp"
-    # Drop the one multi-valued scalar (argv array) — a parquet leaf holds a
-    # single value, so it 400s the whole record. See setup.md (multi-valued scalars).
-    - delete_entries:
-        with_keys:
-          - "/resource/attributes/process.command_args"
   sink:
     # ── SINK → MUSTANG (parquet, PPL) ──────────────────────────────────────
     - opensearch:
@@ -100,12 +95,6 @@ traces-raw-pipeline:
       name: "otel-traces-pipeline"
   processor:
     - otel_traces:
-    # Drop the two multi-valued scalars (argv + product-id arrays) — same
-    # single-value-leaf limit as logs. See setup.md (multi-valued scalars).
-    - delete_entries:
-        with_keys:
-          - "/resource/attributes/process.command_args"
-          - "/attributes/app.filtered_products.list"
     # http.url (leaf) vs http.url.path (object) collide because one dotted key
     # is a prefix of the other; rename so both survive. Without this the whole
     # span 400s and is dropped (both clusters). setup.md defect #2 / diff D4.
@@ -115,8 +104,7 @@ traces-raw-pipeline:
             to_key: "attributes/http.url_path"
   sink:
     # ── SINK → MUSTANG (parquet, PPL) ──────────────────────────────────────
-    # events/links are `nested` w/ dynamic:false — an `object` child breaks every
-    # query on the index (design/mustang-otel-datasource, M2).
+    # events/links are `nested`; their attributes are dynamic `object`s.
     - opensearch:
         hosts: ["http://host.docker.internal:9200"]
         insecure: true
